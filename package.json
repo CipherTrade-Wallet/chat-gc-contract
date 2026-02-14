@@ -1,0 +1,21 @@
+{
+  "name": "chat-gc-contract",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "compile": "hardhat compile",
+    "flatten": "node scripts/flatten.js",
+    "deploy": "hardhat run scripts/deploy.ts",
+    "deploy:mainnet": "hardhat run scripts/deploy.ts --network coti-mainnet",
+    "deploy:testnet": "hardhat run scripts/deploy.ts --network coti-testnet"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "dotenv": "^16.4.5",
+    "hardhat": "^2.22.0",
+    "typescript": "~5.9.3"
+  },
+  "dependencies": {
+    "@coti-io/coti-contracts": "^1.1.0"
+  }
+}

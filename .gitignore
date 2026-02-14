@@ -1,0 +1,20 @@
+node_modules/
+cache/
+artifacts/
+typechain-types/
+dist/
+coverage/
+coverage.json*
+
+# Env and secrets (never commit)
+.env
+.env.*
+.env.local
+.env.production
+!.env.example
+*.pem
+secrets/
+
+# Build artifacts
+*.log
+ChatGC_flat.sol
