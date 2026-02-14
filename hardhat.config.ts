@@ -26,7 +26,7 @@ const config: HardhatUserConfig = {
     },
     "coti-testnet": {
       url: process.env.COTI_TESTNET_RPC_URL ?? "https://testnet.coti.io/rpc",
-      chainId: 2632500,
+      chainId: 7082400,
       accounts: process.env.DEPLOYER_PRIVATE_KEY ? [process.env.DEPLOYER_PRIVATE_KEY] : [],
     },
   },

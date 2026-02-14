@@ -22,14 +22,26 @@ contract ChatGC {
     /// Last message (encrypted for recipient) per recipient; recipient can fetch and decrypt off-chain.
     mapping(address => utString) public lastMessageForRecipient;
 
-    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event OwnershipTransferred(
+        address indexed previousOwner,
+        address indexed newOwner
+    );
     event FeeRecipientSet(address indexed feeRecipient);
     event FeeAmountSet(uint256 feeAmount);
     event Paused();
     event Unpaused();
-    event Submitted(address indexed recipient, uint256 valueSent, uint256 feeTaken);
+    event Submitted(
+        address indexed recipient,
+        uint256 valueSent,
+        uint256 feeTaken
+    );
     /// Emitted for every submit; recipient and sender can query logs for full history or get receipt by tx hash and decrypt.
-    event MessageSubmitted(address indexed recipient, address indexed from, utString messageForRecipient, utString messageForSender);
+    event MessageSubmitted(
+        address indexed recipient,
+        address indexed from,
+        utString messageForRecipient,
+        utString messageForSender
+    );
 
     error OnlyOwner();
     error InvalidRecipient();
@@ -56,7 +68,11 @@ contract ChatGC {
         _locked = 0;
     }
 
-    constructor(address initialOwner_, address initialFeeRecipient_, uint256 initialFeeAmount_) {
+    constructor(
+        address initialOwner_,
+        address initialFeeRecipient_,
+        uint256 initialFeeAmount_
+    ) {
         if (initialOwner_ == address(0)) revert InvalidRecipient();
         if (initialFeeRecipient_ == address(0)) revert InvalidFeeRecipient();
         owner = initialOwner_;
@@ -108,13 +124,22 @@ contract ChatGC {
      * @param message Private message (itString); client must encrypt with COTI SDK before calling.
      * msg.value must be >= feeAmount. Fee goes to feeRecipient; remainder to recipient as tip.
      */
-    function submit(address recipient, itString calldata message) external payable whenNotPaused nonReentrant {
+    function submit(
+        address recipient,
+        itString calldata message
+    ) external payable whenNotPaused nonReentrant {
         if (recipient == address(0)) revert InvalidRecipient();
         if (msg.value < feeAmount) revert InsufficientFee();
 
         gtString memory gtMessage = MpcCore.validateCiphertext(message);
-        utString memory utRecipient = MpcCore.offBoardCombined(gtMessage, recipient);
-        utString memory utSender = MpcCore.offBoardCombined(gtMessage, msg.sender);
+        utString memory utRecipient = MpcCore.offBoardCombined(
+            gtMessage,
+            recipient
+        );
+        utString memory utSender = MpcCore.offBoardCombined(
+            gtMessage,
+            msg.sender
+        );
         lastMessageForRecipient[recipient] = utRecipient;
         emit MessageSubmitted(recipient, msg.sender, utRecipient, utSender);
 
@@ -134,7 +159,9 @@ contract ChatGC {
     }
 
     /// Recipient can call this to get their last message (utString); decrypt off-chain with COTI SDK.
-    function getLastMessage(address account) external view returns (utString memory) {
+    function getLastMessage(
+        address account
+    ) external view returns (utString memory) {
         return lastMessageForRecipient[account];
     }
 }

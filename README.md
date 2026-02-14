@@ -49,13 +49,13 @@ npm run deploy
 
 ## Contract summary
 
-| Item           | Visibility   | Changeable              |
-|----------------|-------------|-------------------------|
-| Owner          | Public      | Yes (`transferOwnership`) |
-| Fee recipient  | Public      | Yes (`setFeeRecipient`)   |
-| Fee amount     | Public      | Yes (`setFeeAmount`)      |
-| Message        | Private     | N/A (per-call input)     |
-| Native amount  | Public      | N/A (`msg.value`)         |
+| Item          | Visibility | Changeable                |
+| ------------- | ---------- | ------------------------- |
+| Owner         | Public     | Yes (`transferOwnership`) |
+| Fee recipient | Public     | Yes (`setFeeRecipient`)   |
+| Fee amount    | Public     | Yes (`setFeeAmount`)      |
+| Message       | Private    | N/A (per-call input)      |
+| Native amount | Public     | N/A (`msg.value`)         |
 
 Network: COTI V2 (chainId 2632500). Explorer: https://mainnet.cotiscan.io
 
