@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-or-later
 pragma solidity ^0.8.19;
 
 import "@coti-io/coti-contracts/contracts/utils/mpc/MpcCore.sol";
@@ -11,6 +11,8 @@ import "@coti-io/coti-contracts/contracts/utils/mpc/MpcCore.sol";
  * - Fee: msg.value must be >= feeAmount. Fee goes to feeRecipient; remainder (if any) to recipient as tip.
  * - Ownership, fee recipient and fee amount are public and changeable by owner.
  * - Pausable: owner can pause/unpause submissions.
+ * - Conversation index: last block and timestamp per (me, peer) for faster loading and "has interacted" / last-msg date.
+ * - Optional per-address nickname (sanitized); set by user for self.
  */
 contract ChatGC {
     address public owner;
@@ -21,6 +23,13 @@ contract ChatGC {
 
     /// Last message (encrypted for recipient) per recipient; recipient can fetch and decrypt off-chain.
     mapping(address => utString) public lastMessageForRecipient;
+
+    /// Conversation index: canonical id = keccak256(abi.encodePacked(min(a,b), max(a,b))).
+    mapping(bytes32 => uint256) public lastBlockForConversation;
+    mapping(bytes32 => uint256) public lastTimestampForConversation;
+
+    /// Optional nickname per address (empty string = none). Sanitized on set.
+    mapping(address => string) public nicknames;
 
     event OwnershipTransferred(
         address indexed previousOwner,
@@ -42,6 +51,7 @@ contract ChatGC {
         utString messageForRecipient,
         utString messageForSender
     );
+    event NicknameSet(address indexed user, string nickname);
 
     error OnlyOwner();
     error InvalidRecipient();
@@ -50,6 +60,8 @@ contract ChatGC {
     error TransferFailed();
     error WhenPaused();
     error ReentrancyGuard();
+    error NicknameTooLong();
+    error InvalidNickname();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert OnlyOwner();
@@ -143,6 +155,13 @@ contract ChatGC {
         lastMessageForRecipient[recipient] = utRecipient;
         emit MessageSubmitted(recipient, msg.sender, utRecipient, utSender);
 
+        (address low, address high) = msg.sender < recipient
+            ? (msg.sender, recipient)
+            : (recipient, msg.sender);
+        bytes32 convId = keccak256(abi.encodePacked(low, high));
+        lastBlockForConversation[convId] = block.number;
+        lastTimestampForConversation[convId] = block.timestamp;
+
         uint256 value = msg.value;
         uint256 fee = feeAmount < value ? feeAmount : value;
         uint256 toRecipient = value - fee;
@@ -163,5 +182,54 @@ contract ChatGC {
         address account
     ) external view returns (utString memory) {
         return lastMessageForRecipient[account];
+    }
+
+    /// Returns the block number of the last message between me and peer (either direction), or 0 if none.
+    function getLastBlockForConversation(
+        address me,
+        address peer
+    ) external view returns (uint256) {
+        (address low, address high) = me < peer ? (me, peer) : (peer, me);
+        return lastBlockForConversation[keccak256(abi.encodePacked(low, high))];
+    }
+
+    /// Returns the Unix timestamp of the last message between me and peer, or 0 if none.
+    function getLastMessageTime(
+        address me,
+        address peer
+    ) external view returns (uint256) {
+        (address low, address high) = me < peer ? (me, peer) : (peer, me);
+        return lastTimestampForConversation[keccak256(abi.encodePacked(low, high))];
+    }
+
+    uint256 public constant NICKNAME_MAX_BYTES = 32;
+
+    /// Set or clear the caller's nickname. Empty string clears. Reverts on invalid content or length.
+    function setMyNickname(string calldata name) external {
+        string memory sanitized = _sanitizeNickname(name);
+        nicknames[msg.sender] = sanitized;
+        emit NicknameSet(msg.sender, sanitized);
+    }
+
+    /// Allowed: printable ASCII except < > " ' & \ and control chars (0x00-0x1F, 0x7F). Max NICKNAME_MAX_BYTES. Trimmed.
+    function _sanitizeNickname(string calldata name) internal pure returns (string memory) {
+        bytes calldata b = bytes(name);
+        uint256 len = b.length;
+        if (len > NICKNAME_MAX_BYTES) revert NicknameTooLong();
+        uint256 start = 0;
+        while (start < len && (uint8(b[start]) <= 0x20 || b[start] == 0x7F)) start++;
+        uint256 end = len;
+        while (end > start && (uint8(b[end - 1]) <= 0x20 || b[end - 1] == 0x7F)) end--;
+        if (start >= end) return ""; // after trim, empty is allowed (clears nickname)
+        uint256 outLen = end - start;
+        if (outLen > NICKNAME_MAX_BYTES) revert NicknameTooLong();
+        bytes memory out = new bytes(outLen);
+        for (uint256 i = 0; i < outLen; i++) {
+            bytes1 c = b[start + i];
+            if (uint8(c) <= 0x20 || c == 0x7F) revert InvalidNickname();
+            if (c == "<" || c == ">" || c == 0x22 || c == 0x27 || c == "&" || c == "\\") revert InvalidNickname();
+            out[i] = c;
+        }
+        return string(out);
     }
 }
