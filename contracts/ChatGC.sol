@@ -27,6 +27,14 @@ contract ChatGC {
     /// Conversation index: canonical id = keccak256(abi.encodePacked(min(a,b), max(a,b))).
     mapping(bytes32 => uint256) public lastBlockForConversation;
     mapping(bytes32 => uint256) public lastTimestampForConversation;
+    /// First message block per conversation (0 if none); lets clients bound getLogs range for history.
+    mapping(bytes32 => uint256) public firstBlockForConversation;
+
+    uint256 public constant MAX_RECENT_PEERS_CAP = 100;
+    /// Current max length of recent peers list (owner can set 1..MAX_RECENT_PEERS_CAP). Higher = more submit gas.
+    uint256 public maxRecentPeers = 20;
+    /// Recent conversation partners per address (most recent first). Only indices 0..maxRecentPeers-1 are used; rest are zero.
+    mapping(address => address[100]) public recentPeersFor;
 
     /// Optional nickname per address (empty string = none). Sanitized on set.
     mapping(address => string) public nicknames;
@@ -52,6 +60,7 @@ contract ChatGC {
         utString messageForSender
     );
     event NicknameSet(address indexed user, string nickname);
+    event MaxRecentPeersSet(uint256 maxRecentPeers);
 
     error OnlyOwner();
     error InvalidRecipient();
@@ -62,6 +71,7 @@ contract ChatGC {
     error ReentrancyGuard();
     error NicknameTooLong();
     error InvalidNickname();
+    error InvalidMaxRecentPeers();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert OnlyOwner();
@@ -116,6 +126,13 @@ contract ChatGC {
         emit FeeAmountSet(newFeeAmount);
     }
 
+    /// Set max length of recent peers list (1..MAX_RECENT_PEERS_CAP). Higher values increase submit() gas.
+    function setMaxRecentPeers(uint256 newMax) external onlyOwner {
+        if (newMax == 0 || newMax > MAX_RECENT_PEERS_CAP) revert InvalidMaxRecentPeers();
+        maxRecentPeers = newMax;
+        emit MaxRecentPeersSet(newMax);
+    }
+
     /// Pause submissions. Owner only.
     function pause() external onlyOwner {
         if (paused) return;
@@ -159,8 +176,11 @@ contract ChatGC {
             ? (msg.sender, recipient)
             : (recipient, msg.sender);
         bytes32 convId = keccak256(abi.encodePacked(low, high));
+        if (firstBlockForConversation[convId] == 0) firstBlockForConversation[convId] = block.number;
         lastBlockForConversation[convId] = block.number;
         lastTimestampForConversation[convId] = block.timestamp;
+        _insertRecentPeer(msg.sender, recipient);
+        _insertRecentPeer(recipient, msg.sender);
 
         uint256 value = msg.value;
         uint256 fee = feeAmount < value ? feeAmount : value;
@@ -200,6 +220,62 @@ contract ChatGC {
     ) external view returns (uint256) {
         (address low, address high) = me < peer ? (me, peer) : (peer, me);
         return lastTimestampForConversation[keccak256(abi.encodePacked(low, high))];
+    }
+
+    /// Returns the block number of the first message between me and peer, or 0 if none. Use as lower bound for getLogs when loading full thread.
+    function getFirstBlockForConversation(
+        address me,
+        address peer
+    ) external view returns (uint256) {
+        (address low, address high) = me < peer ? (me, peer) : (peer, me);
+        return firstBlockForConversation[keccak256(abi.encodePacked(low, high))];
+    }
+
+    /// Returns recent conversation partners for user (most recent first). Only indices 0..maxRecentPeers-1 are valid; filter zeros. Length is MAX_RECENT_PEERS_CAP.
+    function getRecentPeers(address user) external view returns (address[100] memory) {
+        return recentPeersFor[user];
+    }
+
+    /// Returns recent peers plus last block and last timestamp per peer in one call. Use maxRecentPeers to slice; indices beyond are zero.
+    function getRecentPeersWithMeta(address user) external view returns (
+        address[100] memory peers,
+        uint256[100] memory lastBlocks,
+        uint256[100] memory lastTimes
+    ) {
+        uint256 cap = maxRecentPeers;
+        address[100] storage arr = recentPeersFor[user];
+        for (uint256 i = 0; i < 100; i++) {
+            peers[i] = arr[i];
+            if (i < cap && arr[i] != address(0)) {
+                (address low, address high) = user < arr[i] ? (user, arr[i]) : (arr[i], user);
+                bytes32 convId = keccak256(abi.encodePacked(low, high));
+                lastBlocks[i] = lastBlockForConversation[convId];
+                lastTimes[i] = lastTimestampForConversation[convId];
+            }
+        }
+    }
+
+    /// Returns (firstBlock, lastBlock) for the conversation between me and peer. Use for getLogs range [firstBlock, lastBlock].
+    function getConversationBlockRange(address me, address peer) external view returns (uint256 firstBlock, uint256 lastBlock) {
+        (address low, address high) = me < peer ? (me, peer) : (peer, me);
+        bytes32 convId = keccak256(abi.encodePacked(low, high));
+        return (firstBlockForConversation[convId], lastBlockForConversation[convId]);
+    }
+
+    /// Moves peer to front of user's recent list (dedupe), drops oldest if beyond maxRecentPeers.
+    function _insertRecentPeer(address user, address peer) internal {
+        if (peer == address(0) || peer == user) return;
+        uint256 cap = maxRecentPeers;
+        address[100] storage arr = recentPeersFor[user];
+        for (uint256 i = 0; i < cap; i++) {
+            if (arr[i] == peer) {
+                for (uint256 j = i; j + 1 < cap; j++) arr[j] = arr[j + 1];
+                arr[cap - 1] = address(0);
+                break;
+            }
+        }
+        for (uint256 i = cap - 1; i > 0; i--) arr[i] = arr[i - 1];
+        arr[0] = peer;
     }
 
     uint256 public constant NICKNAME_MAX_BYTES = 32;
