@@ -15,26 +15,50 @@ import "@coti-io/coti-contracts/contracts/utils/mpc/MpcCore.sol";
  * - Optional per-address nickname (sanitized); set by user for self.
  */
 contract ChatGC {
+    struct MessageRecord {
+        bool exists;
+        address from;
+        address to;
+        uint64 blockNumber;
+        uint64 timestamp;
+        uint32 chunkCount;
+        uint256 valueSent;
+        uint256 feeTaken;
+    }
+
+    struct MessageView {
+        uint256 id;
+        address from;
+        address to;
+        uint64 blockNumber;
+        uint64 timestamp;
+        uint32 chunkCount;
+        uint256 valueSent;
+        uint256 feeTaken;
+        utString ciphertext;
+    }
+
     address public owner;
     address public feeRecipient;
     uint256 public feeAmount;
     bool public paused;
     uint256 private _locked;
+    uint256 public nextMessageId;
 
-    /// Last message (encrypted for recipient) per recipient; recipient can fetch and decrypt off-chain.
-    mapping(address => utString) public lastMessageForRecipient;
+    uint8 public constant MAX_CHUNK_CELLS = 3;
+    uint32 public constant MAX_CHUNKS_PER_MESSAGE = 64;
+
+    mapping(uint256 => MessageRecord) private _messages;
+    mapping(uint256 => mapping(uint256 => utString)) private _recipientChunks;
+    mapping(uint256 => mapping(uint256 => utString)) private _senderChunks;
+    mapping(address => uint256[]) private _inboxMessageIds;
+    mapping(address => uint256[]) private _sentMessageIds;
 
     /// Conversation index: canonical id = keccak256(abi.encodePacked(min(a,b), max(a,b))).
     mapping(bytes32 => uint256) public lastBlockForConversation;
     mapping(bytes32 => uint256) public lastTimestampForConversation;
     /// First message block per conversation (0 if none); lets clients bound getLogs range for history.
     mapping(bytes32 => uint256) public firstBlockForConversation;
-
-    uint256 public constant MAX_RECENT_PEERS_CAP = 100;
-    /// Current max length of recent peers list (owner can set 1..MAX_RECENT_PEERS_CAP). Higher = more submit gas.
-    uint256 public maxRecentPeers = 20;
-    /// Recent conversation partners per address (most recent first). Only indices 0..maxRecentPeers-1 are used; rest are zero.
-    mapping(address => address[100]) public recentPeersFor;
 
     /// Optional nickname per address (empty string = none). Sanitized on set.
     mapping(address => string) public nicknames;
@@ -52,15 +76,16 @@ contract ChatGC {
         uint256 valueSent,
         uint256 feeTaken
     );
-    /// Emitted for every submit; recipient and sender can query logs for full history or get receipt by tx hash and decrypt.
+    /// Emitted for every submit; clients should use messageId to fetch encrypted chunks from contract state.
     event MessageSubmitted(
+        uint256 indexed messageId,
         address indexed recipient,
         address indexed from,
-        utString messageForRecipient,
-        utString messageForSender
+        uint256 valueSent,
+        uint256 feeTaken,
+        uint32 chunkCount
     );
     event NicknameSet(address indexed user, string nickname);
-    event MaxRecentPeersSet(uint256 maxRecentPeers);
 
     error OnlyOwner();
     error InvalidRecipient();
@@ -71,7 +96,11 @@ contract ChatGC {
     error ReentrancyGuard();
     error NicknameTooLong();
     error InvalidNickname();
-    error InvalidMaxRecentPeers();
+    error InvalidChunkCount();
+    error ChunkTooLarge();
+    error MessageNotFound();
+    error ChunkOutOfBounds();
+    error UnauthorizedViewer();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert OnlyOwner();
@@ -126,13 +155,6 @@ contract ChatGC {
         emit FeeAmountSet(newFeeAmount);
     }
 
-    /// Set max length of recent peers list (1..MAX_RECENT_PEERS_CAP). Higher values increase submit() gas.
-    function setMaxRecentPeers(uint256 newMax) external onlyOwner {
-        if (newMax == 0 || newMax > MAX_RECENT_PEERS_CAP) revert InvalidMaxRecentPeers();
-        maxRecentPeers = newMax;
-        emit MaxRecentPeersSet(newMax);
-    }
-
     /// Pause submissions. Owner only.
     function pause() external onlyOwner {
         if (paused) return;
@@ -157,20 +179,88 @@ contract ChatGC {
         address recipient,
         itString calldata message
     ) external payable whenNotPaused nonReentrant {
-        if (recipient == address(0)) revert InvalidRecipient();
+        _submitSingle(recipient, message);
+    }
+
+    function submitMultipart(
+        address recipient,
+        itString[] calldata messages
+    ) external payable whenNotPaused nonReentrant {
+        if (recipient == address(0) || recipient == msg.sender) revert InvalidRecipient();
+        if (msg.value < feeAmount) revert InsufficientFee();
+        uint256 chunkCount = messages.length;
+        if (chunkCount == 0 || chunkCount > MAX_CHUNKS_PER_MESSAGE) revert InvalidChunkCount();
+
+        (uint256 fee, uint256 toRecipient) = _splitValue();
+        uint256 messageId = _createMessageRecord(recipient, chunkCount, msg.value, fee);
+        for (uint256 i = 0; i < chunkCount; i++) {
+            _storeChunk(messageId, i, recipient, messages[i]);
+        }
+        _finalizeSubmit(messageId, recipient, msg.value, fee, toRecipient, uint32(chunkCount));
+    }
+
+    function _submitSingle(
+        address recipient,
+        itString calldata message
+    ) internal {
+        if (recipient == address(0) || recipient == msg.sender) revert InvalidRecipient();
         if (msg.value < feeAmount) revert InsufficientFee();
 
+        (uint256 fee, uint256 toRecipient) = _splitValue();
+        uint256 messageId = _createMessageRecord(recipient, 1, msg.value, fee);
+        _storeChunk(messageId, 0, recipient, message);
+        _finalizeSubmit(messageId, recipient, msg.value, fee, toRecipient, 1);
+    }
+
+    function _splitValue() internal view returns (uint256 fee, uint256 toRecipient) {
+        uint256 value = msg.value;
+        fee = feeAmount < value ? feeAmount : value;
+        toRecipient = value - fee;
+    }
+
+    function _createMessageRecord(
+        address recipient,
+        uint256 chunkCount,
+        uint256 valueSent,
+        uint256 feeTaken
+    ) internal returns (uint256 messageId) {
+        messageId = nextMessageId++;
+        MessageRecord storage record = _messages[messageId];
+        record.exists = true;
+        record.from = msg.sender;
+        record.to = recipient;
+        record.blockNumber = uint64(block.number);
+        record.timestamp = uint64(block.timestamp);
+        record.chunkCount = uint32(chunkCount);
+        record.valueSent = valueSent;
+        record.feeTaken = feeTaken;
+        _sentMessageIds[msg.sender].push(messageId);
+        _inboxMessageIds[recipient].push(messageId);
+    }
+
+    function _storeChunk(
+        uint256 messageId,
+        uint256 chunkIndex,
+        address recipient,
+        itString calldata message
+    ) internal {
+        _validateEncryptedChunk(message);
         gtString memory gtMessage = MpcCore.validateCiphertext(message);
-        utString memory utRecipient = MpcCore.offBoardCombined(
-            gtMessage,
-            recipient
-        );
-        utString memory utSender = MpcCore.offBoardCombined(
-            gtMessage,
-            msg.sender
-        );
-        lastMessageForRecipient[recipient] = utRecipient;
-        emit MessageSubmitted(recipient, msg.sender, utRecipient, utSender);
+        utString memory utRecipient = MpcCore.offBoardCombined(gtMessage, recipient);
+        utString memory utSender = MpcCore.offBoardCombined(gtMessage, msg.sender);
+        _recipientChunks[messageId][chunkIndex] = utRecipient;
+        _senderChunks[messageId][chunkIndex] = utSender;
+    }
+
+    function _finalizeSubmit(
+        uint256 messageId,
+        address recipient,
+        uint256 value,
+        uint256 fee,
+        uint256 toRecipient,
+        uint32 chunkCount
+    ) internal {
+        emit MessageSubmitted(messageId, recipient, msg.sender, value, fee, chunkCount);
 
         (address low, address high) = msg.sender < recipient
             ? (msg.sender, recipient)
@@ -179,12 +269,6 @@ contract ChatGC {
         if (firstBlockForConversation[convId] == 0) firstBlockForConversation[convId] = block.number;
         lastBlockForConversation[convId] = block.number;
         lastTimestampForConversation[convId] = block.timestamp;
-        _insertRecentPeer(msg.sender, recipient);
-        _insertRecentPeer(recipient, msg.sender);
-
-        uint256 value = msg.value;
-        uint256 fee = feeAmount < value ? feeAmount : value;
-        uint256 toRecipient = value - fee;
 
         if (fee > 0 && feeRecipient != address(0)) {
             (bool ok, ) = payable(feeRecipient).call{value: fee}("");
@@ -197,11 +281,75 @@ contract ChatGC {
         emit Submitted(recipient, value, fee);
     }
 
-    /// Recipient can call this to get their last message (utString); decrypt off-chain with COTI SDK.
-    function getLastMessage(
-        address account
-    ) external view returns (utString memory) {
-        return lastMessageForRecipient[account];
+    function inboxCount(address account) external view returns (uint256) {
+        return _inboxMessageIds[account].length;
+    }
+
+    function sentCount(address account) external view returns (uint256) {
+        return _sentMessageIds[account].length;
+    }
+
+    function getInboxPage(
+        address account,
+        uint256 offset,
+        uint256 limit
+    ) external view returns (uint256[] memory messageIds) {
+        return _slice(_inboxMessageIds[account], offset, limit);
+    }
+
+    function getSentPage(
+        address account,
+        uint256 offset,
+        uint256 limit
+    ) external view returns (uint256[] memory messageIds) {
+        return _slice(_sentMessageIds[account], offset, limit);
+    }
+
+    function getMessageMetadata(
+        uint256 messageId
+    )
+        external
+        view
+        returns (
+            address from,
+            address to,
+            uint64 blockNumber,
+            uint64 timestamp,
+            uint32 chunkCount,
+            uint256 valueSent,
+            uint256 feeTaken
+        )
+    {
+        MessageRecord storage record = _requireMessage(messageId);
+        return (record.from, record.to, record.blockNumber, record.timestamp, record.chunkCount, record.valueSent, record.feeTaken);
+    }
+
+    function getMessage(uint256 messageId) external view returns (MessageView memory messageView) {
+        MessageRecord storage record = _requireMessage(messageId);
+        return MessageView({
+            id: messageId,
+            from: record.from,
+            to: record.to,
+            blockNumber: record.blockNumber,
+            timestamp: record.timestamp,
+            chunkCount: record.chunkCount,
+            valueSent: record.valueSent,
+            feeTaken: record.feeTaken,
+            ciphertext: _messageCiphertextForViewer(messageId, record, msg.sender, 0)
+        });
+    }
+
+    function getMessageChunk(
+        uint256 messageId,
+        uint256 chunkIndex
+    ) external view returns (utString memory ciphertext) {
+        MessageRecord storage record = _requireMessage(messageId);
+        return _messageCiphertextForViewer(messageId, record, msg.sender, chunkIndex);
+    }
+
+    function getMessageChunkCount(uint256 messageId) external view returns (uint256) {
+        MessageRecord storage record = _requireMessage(messageId);
+        return record.chunkCount;
     }
 
     /// Returns the block number of the last message between me and peer (either direction), or 0 if none.
@@ -231,30 +379,6 @@ contract ChatGC {
         return firstBlockForConversation[keccak256(abi.encodePacked(low, high))];
     }
 
-    /// Returns recent conversation partners for user (most recent first). Only indices 0..maxRecentPeers-1 are valid; filter zeros. Length is MAX_RECENT_PEERS_CAP.
-    function getRecentPeers(address user) external view returns (address[100] memory) {
-        return recentPeersFor[user];
-    }
-
-    /// Returns recent peers plus last block and last timestamp per peer in one call. Use maxRecentPeers to slice; indices beyond are zero.
-    function getRecentPeersWithMeta(address user) external view returns (
-        address[100] memory peers,
-        uint256[100] memory lastBlocks,
-        uint256[100] memory lastTimes
-    ) {
-        uint256 cap = maxRecentPeers;
-        address[100] storage arr = recentPeersFor[user];
-        for (uint256 i = 0; i < 100; i++) {
-            peers[i] = arr[i];
-            if (i < cap && arr[i] != address(0)) {
-                (address low, address high) = user < arr[i] ? (user, arr[i]) : (arr[i], user);
-                bytes32 convId = keccak256(abi.encodePacked(low, high));
-                lastBlocks[i] = lastBlockForConversation[convId];
-                lastTimes[i] = lastTimestampForConversation[convId];
-            }
-        }
-    }
-
     /// Returns (firstBlock, lastBlock) for the conversation between me and peer. Use for getLogs range [firstBlock, lastBlock].
     function getConversationBlockRange(address me, address peer) external view returns (uint256 firstBlock, uint256 lastBlock) {
         (address low, address high) = me < peer ? (me, peer) : (peer, me);
@@ -262,20 +386,46 @@ contract ChatGC {
         return (firstBlockForConversation[convId], lastBlockForConversation[convId]);
     }
 
-    /// Moves peer to front of user's recent list (dedupe), drops oldest if beyond maxRecentPeers.
-    function _insertRecentPeer(address user, address peer) internal {
-        if (peer == address(0) || peer == user) return;
-        uint256 cap = maxRecentPeers;
-        address[100] storage arr = recentPeersFor[user];
-        for (uint256 i = 0; i < cap; i++) {
-            if (arr[i] == peer) {
-                for (uint256 j = i; j + 1 < cap; j++) arr[j] = arr[j + 1];
-                arr[cap - 1] = address(0);
-                break;
-            }
+    function _messageCiphertextForViewer(
+        uint256 messageId,
+        MessageRecord storage record,
+        address viewer,
+        uint256 chunkIndex
+    ) internal view returns (utString memory ciphertext) {
+        if (chunkIndex >= record.chunkCount) revert ChunkOutOfBounds();
+        if (viewer == record.from) return _senderChunks[messageId][chunkIndex];
+        if (viewer == record.to) return _recipientChunks[messageId][chunkIndex];
+        revert UnauthorizedViewer();
+    }
+
+    function _requireMessage(uint256 messageId) internal view returns (MessageRecord storage record) {
+        record = _messages[messageId];
+        if (!record.exists) revert MessageNotFound();
+    }
+
+    function _validateEncryptedChunk(itString calldata encryptedChunk) internal pure {
+        uint256 cells = encryptedChunk.ciphertext.value.length;
+        if (
+            cells == 0 ||
+            cells != encryptedChunk.signature.length ||
+            cells > MAX_CHUNK_CELLS
+        ) {
+            revert ChunkTooLarge();
         }
-        for (uint256 i = cap - 1; i > 0; i--) arr[i] = arr[i - 1];
-        arr[0] = peer;
+    }
+
+    function _slice(
+        uint256[] storage source,
+        uint256 offset,
+        uint256 limit
+    ) internal view returns (uint256[] memory page) {
+        if (offset >= source.length || limit == 0) return new uint256[](0);
+        uint256 end = offset + limit;
+        if (end > source.length) end = source.length;
+        page = new uint256[](end - offset);
+        for (uint256 i = offset; i < end; i++) {
+            page[i - offset] = source[i];
+        }
     }
 
     uint256 public constant NICKNAME_MAX_BYTES = 32;

@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { HardhatUserConfig } from "hardhat/config";
 import "@nomicfoundation/hardhat-toolbox";
+import "@nomicfoundation/hardhat-verify";
 
 const config: HardhatUserConfig = {
   solidity: {
@@ -29,6 +30,30 @@ const config: HardhatUserConfig = {
       chainId: 7082400,
       accounts: process.env.DEPLOYER_PRIVATE_KEY ? [process.env.DEPLOYER_PRIVATE_KEY] : [],
     },
+  },
+  etherscan: {
+    apiKey: {
+      "coti-testnet": "placeholder",
+      "coti-mainnet": "placeholder",
+    },
+    customChains: [
+      {
+        network: "coti-testnet",
+        chainId: 7082400,
+        urls: {
+          apiURL: "https://testnet.cotiscan.io/api",
+          browserURL: "https://testnet.cotiscan.io/",
+        },
+      },
+      {
+        network: "coti-mainnet",
+        chainId: 2632500,
+        urls: {
+          apiURL: "https://mainnet.cotiscan.io/api",
+          browserURL: "https://mainnet.cotiscan.io/",
+        },
+      },
+    ],
   },
 };
 

@@ -5,6 +5,8 @@ Smart contract on COTI V2 for **private instant messages** (chat). Clone of Memo
 ## Features
 
 - **Private message**: `itString` message; validated on-chain and stored encrypted for recipient and sender (both can decrypt via COTI SDK).
+- **Mailbox state**: Each message gets a `messageId`, inbox/sent indexes, metadata, and viewer-specific encrypted chunks.
+- **Multipart messages**: `submitMultipart(recipient, messages)` stores up to 64 encrypted chunks for longer chat payloads.
 - **Optional native COTI**: Call `submit(recipient, message)` with `msg.value > 0`; fee (up to `feeAmount`) goes to `feeRecipient`, remainder to `recipient` as tip.
 - **Pausable**: Owner can `pause()` / `unpause()` submissions; reverts with `WhenPaused` when paused.
 - **Conversation index**: Per (me, peer) the contract stores last message block and timestamp. Use `getLastBlockForConversation(me, peer)` and `getLastMessageTime(me, peer)` for faster client loading (e.g. scan only from last block) and for “last message” / “has interacted” UI.
@@ -49,8 +51,10 @@ npm run deploy
 
 1. Use `@coti-io/coti-ethers` to build a wallet and encrypt the message as `itString`.
 2. Call `submit(recipient, message)` (and optionally send native COTI as `msg.value`).
-3. Recipient and sender can query `MessageSubmitted(recipient, from, messageForRecipient, messageForSender)` event logs; decode and decrypt with COTI SDK.
-4. Use `getLastBlockForConversation(me, peer)` and `getLastMessageTime(me, peer)` to scope log queries or show last-activity in UI; use `nicknames(addr)` for display names.
+3. Read `MessageSubmitted(messageId, recipient, from, valueSent, feeTaken, chunkCount)` from the receipt or notification payload.
+4. Recipient and sender can call `getMessage(messageId)` and `getMessageChunk(messageId, chunkIndex)`; decrypt returned `utString` chunks with COTI SDK.
+5. Use `getInboxPage(account, offset, limit)` and `getSentPage(account, offset, limit)` for mailbox recovery/pagination.
+6. Use `getLastBlockForConversation(me, peer)` and `getLastMessageTime(me, peer)` to scope log queries or show last-activity in UI; use `nicknames(addr)` for display names.
 
 ## Contract summary
 
