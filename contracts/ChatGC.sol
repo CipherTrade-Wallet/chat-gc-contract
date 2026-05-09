@@ -69,6 +69,7 @@ contract ChatGC {
     /// First message block per conversation (0 if none); lets clients bound getLogs range for history.
     mapping(bytes32 => uint256) public firstBlockForConversation;
     mapping(bytes32 => uint256) public lastMessageIdForConversation;
+    mapping(bytes32 => uint256[]) private _conversationMessageIds;
     mapping(address => address[]) private _recentConversationPeers;
 
     /// Optional nickname per address (empty string = none). Sanitized on set.
@@ -279,6 +280,7 @@ contract ChatGC {
         lastBlockForConversation[convId] = block.number;
         lastTimestampForConversation[convId] = block.timestamp;
         lastMessageIdForConversation[convId] = messageId;
+        _conversationMessageIds[convId].push(messageId);
         _touchRecentConversation(msg.sender, recipient);
         _touchRecentConversation(recipient, msg.sender);
 
@@ -413,6 +415,19 @@ contract ChatGC {
     function getConversationBlockRange(address me, address peer) external view returns (uint256 firstBlock, uint256 lastBlock) {
         bytes32 convId = _conversationId(me, peer);
         return (firstBlockForConversation[convId], lastBlockForConversation[convId]);
+    }
+
+    function conversationMessageCount(address me, address peer) external view returns (uint256) {
+        return _conversationMessageIds[_conversationId(me, peer)].length;
+    }
+
+    function getConversationMessagePage(
+        address me,
+        address peer,
+        uint256 offset,
+        uint256 limit
+    ) external view returns (uint256[] memory messageIds) {
+        return _slice(_conversationMessageIds[_conversationId(me, peer)], offset, limit);
     }
 
     function _touchRecentConversation(address user, address peer) internal {
