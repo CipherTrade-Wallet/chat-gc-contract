@@ -53,6 +53,7 @@ contract ChatGC {
     uint256 public nextMessageId;
 
     uint8 public constant MAX_CHUNK_CELLS = 3;
+    uint8 public constant MAX_SINGLE_MESSAGE_CELLS = 64;
     uint32 public constant MAX_CHUNKS_PER_MESSAGE = 64;
     uint256 public constant MAX_RECENT_CONVERSATIONS = 50;
 
@@ -204,7 +205,7 @@ contract ChatGC {
         (uint256 fee, uint256 toRecipient) = _splitValue();
         uint256 messageId = _createMessageRecord(recipient, chunkCount, msg.value, fee);
         for (uint256 i = 0; i < chunkCount; i++) {
-            _storeChunk(messageId, i, recipient, messages[i]);
+            _storeChunk(messageId, i, recipient, messages[i], MAX_CHUNK_CELLS);
         }
         _finalizeSubmit(messageId, recipient, msg.value, fee, toRecipient, uint32(chunkCount));
     }
@@ -218,7 +219,7 @@ contract ChatGC {
 
         (uint256 fee, uint256 toRecipient) = _splitValue();
         uint256 messageId = _createMessageRecord(recipient, 1, msg.value, fee);
-        _storeChunk(messageId, 0, recipient, message);
+        _storeChunk(messageId, 0, recipient, message, MAX_SINGLE_MESSAGE_CELLS);
         _finalizeSubmit(messageId, recipient, msg.value, fee, toRecipient, 1);
     }
 
@@ -252,9 +253,10 @@ contract ChatGC {
         uint256 messageId,
         uint256 chunkIndex,
         address recipient,
-        itString calldata message
+        itString calldata message,
+        uint256 maxCells
     ) internal {
-        _validateEncryptedChunk(message);
+        _validateEncryptedChunk(message, maxCells);
         gtString memory gtMessage = MpcCore.validateCiphertext(message);
         utString memory utRecipient = MpcCore.offBoardCombined(gtMessage, recipient);
         utString memory utSender = MpcCore.offBoardCombined(gtMessage, msg.sender);
@@ -459,12 +461,12 @@ contract ChatGC {
         if (!record.exists) revert MessageNotFound();
     }
 
-    function _validateEncryptedChunk(itString calldata encryptedChunk) internal pure {
+    function _validateEncryptedChunk(itString calldata encryptedChunk, uint256 maxCells) internal pure {
         uint256 cells = encryptedChunk.ciphertext.value.length;
         if (
             cells == 0 ||
             cells != encryptedChunk.signature.length ||
-            cells > MAX_CHUNK_CELLS
+            cells > maxCells
         ) {
             revert ChunkTooLarge();
         }
