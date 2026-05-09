@@ -38,6 +38,13 @@ contract ChatGC {
         utString ciphertext;
     }
 
+    struct ConversationPreview {
+        address peer;
+        uint256 messageId;
+        uint64 blockNumber;
+        uint64 timestamp;
+    }
+
     address public owner;
     address public feeRecipient;
     uint256 public feeAmount;
@@ -47,6 +54,7 @@ contract ChatGC {
 
     uint8 public constant MAX_CHUNK_CELLS = 3;
     uint32 public constant MAX_CHUNKS_PER_MESSAGE = 64;
+    uint256 public constant MAX_RECENT_CONVERSATIONS = 50;
 
     mapping(uint256 => MessageRecord) private _messages;
     mapping(uint256 => mapping(uint256 => utString)) private _recipientChunks;
@@ -59,6 +67,8 @@ contract ChatGC {
     mapping(bytes32 => uint256) public lastTimestampForConversation;
     /// First message block per conversation (0 if none); lets clients bound getLogs range for history.
     mapping(bytes32 => uint256) public firstBlockForConversation;
+    mapping(bytes32 => uint256) public lastMessageIdForConversation;
+    mapping(address => address[]) private _recentConversationPeers;
 
     /// Optional nickname per address (empty string = none). Sanitized on set.
     mapping(address => string) public nicknames;
@@ -262,13 +272,13 @@ contract ChatGC {
     ) internal {
         emit MessageSubmitted(messageId, recipient, msg.sender, value, fee, chunkCount);
 
-        (address low, address high) = msg.sender < recipient
-            ? (msg.sender, recipient)
-            : (recipient, msg.sender);
-        bytes32 convId = keccak256(abi.encodePacked(low, high));
+        bytes32 convId = _conversationId(msg.sender, recipient);
         if (firstBlockForConversation[convId] == 0) firstBlockForConversation[convId] = block.number;
         lastBlockForConversation[convId] = block.number;
         lastTimestampForConversation[convId] = block.timestamp;
+        lastMessageIdForConversation[convId] = messageId;
+        _touchRecentConversation(msg.sender, recipient);
+        _touchRecentConversation(recipient, msg.sender);
 
         if (fee > 0 && feeRecipient != address(0)) {
             (bool ok, ) = payable(feeRecipient).call{value: fee}("");
@@ -352,13 +362,33 @@ contract ChatGC {
         return record.chunkCount;
     }
 
+    function getRecentConversations(
+        address account,
+        uint256 limit
+    ) external view returns (ConversationPreview[] memory previews) {
+        address[] storage peers = _recentConversationPeers[account];
+        uint256 count = peers.length;
+        if (limit < count) count = limit;
+        if (count > MAX_RECENT_CONVERSATIONS) count = MAX_RECENT_CONVERSATIONS;
+        previews = new ConversationPreview[](count);
+        for (uint256 i = 0; i < count; i++) {
+            address peer = peers[i];
+            bytes32 convId = _conversationId(account, peer);
+            previews[i] = ConversationPreview({
+                peer: peer,
+                messageId: lastMessageIdForConversation[convId],
+                blockNumber: uint64(lastBlockForConversation[convId]),
+                timestamp: uint64(lastTimestampForConversation[convId])
+            });
+        }
+    }
+
     /// Returns the block number of the last message between me and peer (either direction), or 0 if none.
     function getLastBlockForConversation(
         address me,
         address peer
     ) external view returns (uint256) {
-        (address low, address high) = me < peer ? (me, peer) : (peer, me);
-        return lastBlockForConversation[keccak256(abi.encodePacked(low, high))];
+        return lastBlockForConversation[_conversationId(me, peer)];
     }
 
     /// Returns the Unix timestamp of the last message between me and peer, or 0 if none.
@@ -366,8 +396,7 @@ contract ChatGC {
         address me,
         address peer
     ) external view returns (uint256) {
-        (address low, address high) = me < peer ? (me, peer) : (peer, me);
-        return lastTimestampForConversation[keccak256(abi.encodePacked(low, high))];
+        return lastTimestampForConversation[_conversationId(me, peer)];
     }
 
     /// Returns the block number of the first message between me and peer, or 0 if none. Use as lower bound for getLogs when loading full thread.
@@ -375,15 +404,42 @@ contract ChatGC {
         address me,
         address peer
     ) external view returns (uint256) {
-        (address low, address high) = me < peer ? (me, peer) : (peer, me);
-        return firstBlockForConversation[keccak256(abi.encodePacked(low, high))];
+        return firstBlockForConversation[_conversationId(me, peer)];
     }
 
     /// Returns (firstBlock, lastBlock) for the conversation between me and peer. Use for getLogs range [firstBlock, lastBlock].
     function getConversationBlockRange(address me, address peer) external view returns (uint256 firstBlock, uint256 lastBlock) {
-        (address low, address high) = me < peer ? (me, peer) : (peer, me);
-        bytes32 convId = keccak256(abi.encodePacked(low, high));
+        bytes32 convId = _conversationId(me, peer);
         return (firstBlockForConversation[convId], lastBlockForConversation[convId]);
+    }
+
+    function _touchRecentConversation(address user, address peer) internal {
+        if (peer == address(0) || peer == user) return;
+        address[] storage peers = _recentConversationPeers[user];
+        uint256 len = peers.length;
+        for (uint256 i = 0; i < len; i++) {
+            if (peers[i] == peer) {
+                for (uint256 j = i; j > 0; j--) {
+                    peers[j] = peers[j - 1];
+                }
+                peers[0] = peer;
+                return;
+            }
+        }
+        peers.push(peer);
+        len = peers.length;
+        for (uint256 j = len - 1; j > 0; j--) {
+            peers[j] = peers[j - 1];
+        }
+        peers[0] = peer;
+        if (peers.length > MAX_RECENT_CONVERSATIONS) {
+            peers.pop();
+        }
+    }
+
+    function _conversationId(address a, address b) internal pure returns (bytes32) {
+        (address low, address high) = a < b ? (a, b) : (b, a);
+        return keccak256(abi.encodePacked(low, high));
     }
 
     function _messageCiphertextForViewer(
